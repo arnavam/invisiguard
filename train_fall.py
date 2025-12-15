@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.optim as optim
 from create_dataset import create_fall_adl_dataset
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities.model_summary import ModelSummary
 from sklearn.metrics import (
     confusion_matrix,
     f1_score,
@@ -71,8 +73,8 @@ class FallDataModule(pl.LightningDataModule):
         # label_map = label_map[idx] if isinstance(label_map, np.ndarray) else np.array(label_map)[idx]
         # selected_columns = selected_columns[idx] if isinstance(selected_columns, np.ndarray) else np.array(selected_columns)[idx]
 
-        self.sequences = sequences[:1000]
-        self.labels = labels[:1000]
+        self.sequences = sequences
+        self.labels = labels
 
     def setup(self, stage: Optional[str] = None):
         """Split data into train, val, test"""
@@ -96,12 +98,14 @@ class FallDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(
-            self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4
+            self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4,
+            persistent_workers=True
         )
 
     def val_dataloader(self):
         return DataLoader(
-            self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4
+            self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4,
+            persistent_workers=True
         )
 
     def test_dataloader(self):
@@ -137,13 +141,7 @@ class FallDetectionLSTM(pl.LightningModule):
         # Calculate output dimension
         lstm_output_dim = hidden_dim * 2 if bidirectional else hidden_dim
 
-        # Attention layer (optional)
-        # self.attention = nn.Sequential(
-        #     nn.Linear(lstm_output_dim, 64),
-        #     nn.Tanh(),
-        #     nn.Linear(64, 1),
-        #     nn.Softmax(dim=1),
-        # )
+
 
         # Classification head
         self.classifier = nn.Sequential(
@@ -325,6 +323,9 @@ def train_model():
         bidirectional=True,
     )
 
+    # Print an accurate FP32 model summary (even if training will use mixed precision)
+    print(ModelSummary(model.float(), max_depth=2))
+    
     # Callbacks
     early_stopping = EarlyStopping(
         monitor="val_loss", patience=10, mode="min", verbose=True
@@ -337,14 +338,20 @@ def train_model():
         save_top_k=3,
     )
 
-    # Trainer
+    # Logger
+    logger = TensorBoardLogger("logs/", name="fall_detection")
+
+    # Trainer: use mixed precision on GPU, but disable Lightning's built-in summary
+    use_cuda = torch.cuda.is_available()
     trainer = pl.Trainer(
-        max_epochs=10,
+        max_epochs=100,
         callbacks=[early_stopping, checkpoint_callback],
-        accelerator="auto",  # Uses GPU if available
-        devices="auto",
+        accelerator="gpu" if use_cuda else "cpu",
+        devices=1 if use_cuda else None,
         log_every_n_steps=10,
-        precision=16,  # Mixed precision training for faster training
+        precision=16 if use_cuda else 32,  # train in 16-bit on GPU
+        logger=logger,
+        enable_model_summary=False,        # we've printed our own FP32 summary
     )
 
     # Train
@@ -353,7 +360,7 @@ def train_model():
     # Test
     trainer.test(model, data_module)
 
-    return model, trainer
+    return model, trainer, data_module
 
 
 # 5. Inference function
@@ -387,12 +394,17 @@ def predict_fall(model: FallDetectionLSTM, sequence: np.ndarray) -> Tuple[int, f
 
 # 6. Example usage
 if __name__ == "__main__":
-    # Train the model
-    model, trainer = train_model()
+    # Train the model and get the data module back
+    model, trainer, data_module = train_model()
 
-    # Example of making a prediction
-    example_sequence = np.random.randn(50, 2)  # Replace with real data
-    prediction, confidence = predict_fall(model, example_sequence)
+    # Use a real sample from the test dataset instead of a random sequence
+    # data_module.test_dataset is a Subset; indexing returns (sequence_tensor, label_tensor)
+    sample_seq_tensor, sample_label_tensor = data_module.test_dataset[0]
+    sample_seq = sample_seq_tensor.cpu().numpy() if isinstance(sample_seq_tensor, torch.Tensor) else sample_seq_tensor
+    sample_label = int(sample_label_tensor.item()) if isinstance(sample_label_tensor, torch.Tensor) else int(sample_label_tensor)
 
-    print(f"\nPrediction: {'Fall' if prediction == 1 else 'No Fall'}")
+    prediction, confidence = predict_fall(model, sample_seq)
+
+    print(f"\nGround truth: {'Fall' if sample_label == 1 else 'No Fall'}")
+    print(f"Prediction: {'Fall' if prediction == 1 else 'No Fall'}")
     print(f"Confidence: {confidence:.2%}")

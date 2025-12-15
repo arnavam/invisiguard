@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 
 
 def evaluate_model_simple(
-    model_path="checkpoints/fall-detection-epoch=10-val_loss=0.00.ckpt",
+    model_path="checkpoints/fall-detection-epoch=35-val_loss=0.26.ckpt",
 ):
     """Simple evaluation for binary classification"""
     from train_fall import FallDataModule, FallDetectionLSTM
@@ -56,6 +56,10 @@ def evaluate_model_simple(
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
     all_probs = np.array(all_probs)
+
+    # Debugging output for all_probs
+    print("all_probs shape:", all_probs.shape)
+    print("sample prob row:", all_probs[:5])
 
     # Get unique classes present in data
     unique_classes = np.unique(np.concatenate([all_targets, all_preds]))
@@ -130,11 +134,13 @@ def evaluate_model_simple(
 
     # Plot 2: Prediction distribution
     ax2 = axes[1]
+    # Determine positive-class probabilities robustly
     if len(unique_classes) == 2:
-        # For binary classification, show probability distribution
-        positive_probs = (
-            all_probs[:, 1] if all_probs.shape[1] == 2 else all_probs.flatten()
-        )
+        # For binary classification, handle either (N,2) or (N,) / (N,1) shapes
+        if all_probs.ndim == 2 and all_probs.shape[1] == 2:
+            positive_probs = all_probs[:, 1]
+        else:
+            positive_probs = all_probs.flatten()
         ax2.hist(positive_probs[all_targets == 0], alpha=0.5, label="Non-Fall", bins=20)
         ax2.hist(positive_probs[all_targets == 1], alpha=0.5, label="Fall", bins=20)
         ax2.set_xlabel("Predicted Probability of Fall")
@@ -198,15 +204,13 @@ def evaluate_model_simple(
     print(metrics_df.to_string(index=False))
 
     # Save predictions for analysis
-    results_df = pd.DataFrame(
-        {
-            "target": all_targets,
-            "prediction": all_preds,
-            "probability": all_probs[:, 1]
-            if all_probs.shape[1] == 2
-            else all_probs.flatten(),
-        }
-    )
+    # Save probabilities safely (supports (N,2), (N,1) and (N,) shapes)
+    if all_probs.ndim == 2 and all_probs.shape[1] == 2:
+        prob_col = all_probs[:, 1]
+    else:
+        prob_col = all_probs.flatten()
+
+    results_df = pd.DataFrame({"target": all_targets, "prediction": all_preds, "probability": prob_col})
     results_df.to_csv("predictions_analysis.csv", index=False)
     print("\nDetailed predictions saved to 'predictions_analysis.csv'")
 
