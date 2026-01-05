@@ -104,10 +104,7 @@ def predict_file(
     # ------- plot two features with probability overlay (use probability directly) -------
     # decide which columns to plot
     if plot_cols is None:
-        if len(selected) >= 2:
-            plot_cols = [selected[0], selected[1]]
-        else:
-            plot_cols = [selected[0], selected[0]]
+            plot_cols = [selected[0], selected[1],selected[2]]
 
     plot_cols = [c for c in plot_cols if c in df.columns]
     if len(plot_cols) == 0:
@@ -119,6 +116,7 @@ def predict_file(
         ax.plot(time, df[plot_cols[0]].to_numpy(dtype=float), label=plot_cols[0], linewidth=1.2)
         if len(plot_cols) > 1 and plot_cols[1] != plot_cols[0]:
             ax.plot(time, df[plot_cols[1]].to_numpy(dtype=float), label=plot_cols[1], linewidth=1.0, alpha=0.9)
+
 
         # overlay probability as semi-transparent red spans where intensity ~ prob
         max_alpha = 0.7  # scale for visibility
@@ -157,7 +155,7 @@ if __name__ == "__main__":
     ckpt_path = r"checkpoints/fall-detection-epoch=35-val_loss=0.26.ckpt"  # path to your checkpoint
     seq_len = 100
     step_size = 20
-    cols = None  # e.g. ["acc_x", "acc_y", "acc_z"] or None to auto-select numeric cols
+    cols = ["Acc_x", "Acc_y", "Acc_z"] #or None to auto-select numeric cols
     threshold = 0.5
     save_csv = "file_predictions.csv"
 

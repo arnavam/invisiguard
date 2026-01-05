@@ -18,8 +18,6 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader, Dataset, random_split
 
 # 1. Custom Dataset
-
-
 class FallDataset(Dataset):
     def __init__(self, sequences: np.ndarray, labels: np.ndarray):
         """
