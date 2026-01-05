@@ -1,11 +1,13 @@
 """
-Rule-Based Motion Detection: Predict on a single file
-Produces output similar to predict_single_file.py but using rule-based detection.
+ML-Based Motion Detection: Predict on a single file
+Produces output similar to predict_single_file.py but using the ML motion classifier.
+
+Uses MotionClassifierLSTM from detect_motion_ml.py to classify sudden vs normal motion.
 
 Outputs:
 - Console summary with per-window predictions
 - CSV file with detailed results
-- Plot with confidence overlay (like file_prediction_plot.png)
+- Plot with probability overlay (like file_prediction_plot.png)
 """
 
 import os
@@ -13,9 +15,10 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+import torch
 import matplotlib.pyplot as plt
 
-from detect_motion_rulebased import SuddenMotionDetector
+from detect_motion_ml import MotionClassifierLSTM, MotionFeatureExtractor
 
 
 def select_numeric_columns(df: pd.DataFrame, cols: Optional[List[str]] = None) -> List[str]:
@@ -24,37 +27,60 @@ def select_numeric_columns(df: pd.DataFrame, cols: Optional[List[str]] = None) -
     return df.select_dtypes(include=[np.number]).columns.tolist()
 
 
-def predict_file_rulebased(
+def create_sliding_windows(data: np.ndarray, seq_len: int = 100, step_size: int = 20) -> List[np.ndarray]:
+    """Create sliding windows from data array."""
+    windows = []
+    for i in range(0, len(data) - seq_len + 1, step_size):
+        windows.append(data[i:i + seq_len])
+    return windows
+
+
+def normalize_sequences(sequences: np.ndarray) -> np.ndarray:
+    """Normalize sequences per-feature across all windows."""
+    # Shape: (n_windows, seq_len, n_features)
+    n_windows, seq_len, n_features = sequences.shape
+    
+    # Flatten to (n_windows * seq_len, n_features), normalize, reshape back
+    flat = sequences.reshape(-1, n_features)
+    
+    # Normalize each feature to [0, 1] or z-score
+    for f in range(n_features):
+        col = flat[:, f]
+        min_val, max_val = col.min(), col.max()
+        if max_val - min_val > 1e-8:
+            flat[:, f] = (col - min_val) / (max_val - min_val)
+        else:
+            flat[:, f] = 0.0
+    
+    return flat.reshape(n_windows, seq_len, n_features)
+
+
+def predict_file_ml(
     csv_path: str,
+    ckpt_path: str,
     seq_len: int = 100,
     step_size: int = 20,
     cols: Optional[List[str]] = None,
     threshold: float = 0.5,
-    save_csv: str = "rulebased_predictions.csv",
+    save_csv: str = "ml_motion_predictions.csv",
     plot_cols: Optional[List[str]] = None,
-    save_plot: str = "rulebased_prediction_plot.png",
-    window_size: int = 20,
-    use_kalman: bool = False,
-    gravity: float = 1.0,
+    save_plot: str = "ml_motion_prediction_plot.png",
+    use_features: bool = True,
 ):
     """
-    Analyze a CSV file using rule-based sudden motion detection.
-    
-    Similar interface to predict_file() but uses SuddenMotionDetector
-    instead of the LSTM model.
+    Analyze a CSV file using the ML-based motion classifier.
     
     Args:
         csv_path: Path to the input CSV file
+        ckpt_path: Path to the trained model checkpoint (.ckpt)
         seq_len: Sequence length for windowing (samples per window)
         step_size: Step size between windows
         cols: Columns to use [x, y, z] - auto-detected if None
-        threshold: Threshold for sudden motion detection (on combined score 0-1)
+        threshold: Threshold for sudden motion classification (0-1)
         save_csv: Path to save detailed CSV results
         plot_cols: Columns to plot (first 2-3 from cols if None)
         save_plot: Path to save the plot
-        window_size: Rolling window size for the detector
-        use_kalman: Whether to use Kalman filter for noise reduction
-        gravity: Set to 9.81 if data is in m/s², or 1.0 if already in g
+        use_features: Whether to extract motion features (must match training)
     """
     # Load CSV
     df = pd.read_csv(csv_path)
@@ -66,65 +92,47 @@ def predict_file_rulebased(
     x_col, y_col, z_col = selected[0], selected[1], selected[2]
     data = df[[x_col, y_col, z_col]].to_numpy(dtype=np.float32)
     
-    # Create detector
-    detector = SuddenMotionDetector(
-        window_size=window_size,
-        use_kalman=use_kalman,
-        gravity=gravity,
-    )
+    # Create sliding windows
+    windows = create_sliding_windows(data, seq_len=seq_len, step_size=step_size)
+    sequences = np.array(windows, dtype=np.float32)  # (n_windows, seq_len, 3)
     
-    # Run detection on entire file sample-by-sample
-    sample_results = detector.detect_batch(data)
+    # Extract features if needed
+    if use_features:
+        sequences = MotionFeatureExtractor.extract_batch(sequences)
     
-    # Build sliding windows and aggregate per-window probabilities
-    n_samples = len(data)
-    n_windows = max(1, (n_samples - seq_len) // step_size + 1)
+    # Normalize
+    sequences = normalize_sequences(sequences)
     
+    # Load model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MotionClassifierLSTM.load_from_checkpoint(ckpt_path, map_location=device)
+    model.to(device)
+    model.eval()
+    
+    # Inference
+    with torch.no_grad():
+        inputs = torch.from_numpy(sequences).float().to(device)
+        logits = model(inputs)
+        probs = torch.sigmoid(logits).cpu().numpy().flatten()
+        preds = (probs >= threshold).astype(int)
+    
+    # Map windows to sample ranges
     window_ranges = []
-    window_probs = []
-    window_preds = []
-    window_sudden_counts = []
-    
-    for i in range(n_windows):
+    for i in range(len(sequences)):
         start = i * step_size
-        end = min(start + seq_len - 1, n_samples - 1)
+        end = start + seq_len - 1
+        if end >= len(data):
+            end = len(data) - 1
         window_ranges.append((start, end))
-        
-        # Get sample results in this window
-        window_samples = sample_results[start:end+1]
-        
-        # Aggregate: use average confidence of sudden samples, or overall "suddenness" score
-        # We'll compute the fraction of samples that are sudden + average confidence
-        sudden_count = sum(1 for s in window_samples if s.is_sudden)
-        total = len(window_samples)
-        
-        if total == 0:
-            prob = 0.0
-        else:
-            # Combine: fraction sudden + average confidence of sudden samples
-            sudden_samples = [s for s in window_samples if s.is_sudden]
-            if sudden_samples:
-                avg_confidence = np.mean([s.confidence for s in sudden_samples])
-                # Probability = weighted combination
-                prob = 0.5 * (sudden_count / total) + 0.5 * avg_confidence
-            else:
-                # No sudden samples - use inverse of average confidence for normal
-                normal_confidence = np.mean([s.confidence for s in window_samples])
-                prob = max(0, 1 - normal_confidence) * 0.5
-        
-        window_probs.append(prob)
-        window_preds.append(1 if prob >= threshold else 0)
-        window_sudden_counts.append(sudden_count)
-    
-    probs = np.array(window_probs)
-    preds = np.array(window_preds)
     
     # Summary
+    n_windows = len(sequences)
     n_sudden = int(preds.sum())
     n_normal = n_windows - n_sudden
     
     print(f"File: {csv_path}")
     print(f"Using columns: {[x_col, y_col, z_col]}")
+    print(f"Checkpoint: {ckpt_path}")
     print(f"Seq len: {seq_len}, step: {step_size}, windows: {n_windows}")
     print(f"Predicted sudden windows: {n_sudden}, normal: {n_normal}")
     
@@ -136,10 +144,10 @@ def predict_file_rulebased(
         print("SUMMARY: Mixed predictions across windows")
     
     # Print per-window short report
-    print("\nWindow index | start:end | prob | pred | sudden_samples")
+    print("\nWindow index | start:end | prob | pred")
     for i, (s, e) in enumerate(window_ranges):
         pred_label = 'SUDDEN' if preds[i] == 1 else 'NORMAL'
-        print(f"{i:03d} | {s:04d}:{e:04d} | {probs[i]:.3f} | {pred_label} | {window_sudden_counts[i]}")
+        print(f"{i:03d} | {s:04d}:{e:04d} | {probs[i]:.3f} | {pred_label}")
     
     # Save detailed CSV
     results = pd.DataFrame({
@@ -148,27 +156,9 @@ def predict_file_rulebased(
         "end": [r[1] for r in window_ranges],
         "probability": probs,
         "prediction": preds,
-        "sudden_sample_count": window_sudden_counts,
     })
     results.to_csv(save_csv, index=False)
     print(f"\nDetailed per-window results saved to: {os.path.abspath(save_csv)}")
-    
-    # Also save per-sample results
-    sample_csv = save_csv.replace(".csv", "_samples.csv")
-    sample_df = pd.DataFrame({
-        "index": np.arange(len(sample_results)),
-        "is_sudden": [r.is_sudden for r in sample_results],
-        "motion_type": [r.motion_type for r in sample_results],
-        "confidence": [r.confidence for r in sample_results],
-        "magnitude": [r.magnitude for r in sample_results],
-        "jerk": [r.jerk for r in sample_results],
-        "rolling_std": [r.rolling_std for r in sample_results],
-        "score_magnitude": [r.score_magnitude for r in sample_results],
-        "score_jerk": [r.score_jerk for r in sample_results],
-        "score_rolling_std": [r.score_rolling_std for r in sample_results],
-    })
-    sample_df.to_csv(sample_csv, index=False)
-    print(f"Per-sample results saved to: {os.path.abspath(sample_csv)}")
     
     # ------- Plot -------
     if plot_cols is None:
@@ -206,7 +196,7 @@ def predict_file_rulebased(
         
         ax.set_xlabel("Sample index")
         ax.set_ylabel("Acceleration Value")
-        ax.set_title(f"Rule-Based Motion Detection: {plot_cols} with probability overlay (red intensity ~ prob)")
+        ax.set_title(f"ML Motion Detection: {plot_cols} with probability overlay (red intensity ~ prob)")
         ax.legend(loc="upper left")
         ax2.legend(loc="upper right")
         plt.tight_layout()
@@ -224,27 +214,43 @@ def predict_file_rulebased(
 if __name__ == "__main__":
     # Configure these variables (similar to predict_single_file.py)
     csv_path = r"JO_FALL/volunteer_1_left_hand/adl/applaud.csv"  # path to your CSV
+    
+    # Path to trained motion classifier checkpoint
+    # NOTE: You need to train the motion classifier first using detect_motion_ml.py
+    # or use the existing fall detection checkpoint if applicable
+    ckpt_path = r"checkpoints/motion/motion-classifier-epoch=09-val_loss=0.27.ckpt"
+    
     seq_len = 100
     step_size = 20
     cols = ["Acc_x", "Acc_y", "Acc_z"]  # or None to auto-select numeric cols
     threshold = 0.5
-    save_csv = "rulebased_predictions.csv"
-    save_plot = "rulebased_prediction_plot.png"
+    save_csv = "predictions/ml_motion_predictions.csv"
+    save_plot = "predictions/ml_motion_prediction_plot.png"
+    use_features = True  # Must match how model was trained
     
-    # Detector settings
-    window_size = 20       # Rolling window for detector
-    use_kalman = False     # Set True for noisy data
-    gravity = 1.0          # Set to 9.81 if data is in m/s²
-    
-    predict_file_rulebased(
-        csv_path=csv_path,
-        seq_len=seq_len,
-        step_size=step_size,
-        cols=cols,
-        threshold=threshold,
-        save_csv=save_csv,
-        save_plot=save_plot,
-        window_size=window_size,
-        use_kalman=use_kalman,
-        gravity=gravity,
-    )
+    # Check if checkpoint exists
+    if not os.path.exists(ckpt_path):
+        print("=" * 60)
+        print("ERROR: No trained motion classifier checkpoint found!")
+        print("=" * 60)
+        print(f"\nLooking for: {ckpt_path}")
+        print("\nYou need to train the motion classifier first:")
+        print("  1. Run: python detect_motion_ml.py")
+        print("  2. Or train with your own data:")
+        print("     from detect_motion_ml import train_motion_classifier")
+        print("     model, _, _ = train_motion_classifier(sequences, labels)")
+        print("\nAlternatively, you can use the rule-based detector:")
+        print("  python predict_single_file_rulebased.py")
+        print("=" * 60)
+    else:
+        predict_file_ml(
+            csv_path=csv_path,
+            ckpt_path=ckpt_path,
+            seq_len=seq_len,
+            step_size=step_size,
+            cols=cols,
+            threshold=threshold,
+            save_csv=save_csv,
+            save_plot=save_plot,
+            use_features=use_features,
+        )

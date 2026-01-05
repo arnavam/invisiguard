@@ -145,9 +145,15 @@ class MotionDataModule(pl.LightningDataModule):
             # Generate synthetic demo data
             print("No data provided. Generating synthetic demo data...")
             self.sequences, self.labels = self._generate_demo_data()
-            if self.use_features:
-                self.sequences = MotionFeatureExtractor.extract_batch(self.sequences)
-                self.input_dim = self.sequences.shape[2]
+        
+        # Extract features if needed and not already done
+        if self.use_features and self.sequences.shape[2] == 3:
+            print("Extracting motion features...")
+            self.sequences = MotionFeatureExtractor.extract_batch(self.sequences)
+            self.input_dim = self.sequences.shape[2]
+            print(f"Features extracted. Input dimension: {self.input_dim}")
+        elif self.sequences is not None:
+            self.input_dim = self.sequences.shape[2]
         
         dataset = MotionDataset(self.sequences, self.labels)
         
@@ -584,11 +590,31 @@ if __name__ == "__main__":
     print("MOTION CLASSIFIER - ML Approach (LSTM)")
     print("=" * 60)
     
-    # Train model with synthetic data (replace with your actual data)
+    # Option 1: Use data from create_dataset.py (fall/ADL dataset)
+    USE_REAL_DATA = True
+    
+    if USE_REAL_DATA:
+        print("\nLoading dataset from JO_FALL folder...")
+        from create_dataset import create_fall_adl_dataset
+        
+        sequences, labels, label_map, feature_names = create_fall_adl_dataset(
+            data_folder="JO_FALL",
+            seq_len=100,
+            step_size=20,
+            normalize=True,
+        )
+        print(f"Loaded dataset: {sequences.shape}, labels: {labels.shape}")
+        print(f"Label mapping: {label_map}")  # {'adl': 0, 'fall': 1}
+        # Note: For motion detection, we treat 'fall' as 'sudden' motion
+    else:
+        sequences = None
+        labels = None
+    
+    # Train model
     print("\nTraining motion classifier...")
     model, trainer, data_module = train_motion_classifier(
-        sequences=None,  # Will generate synthetic demo data
-        labels=None,
+        sequences=sequences,
+        labels=labels,
         max_epochs=30,
         batch_size=32,
         use_features=True,
@@ -599,9 +625,8 @@ if __name__ == "__main__":
     sample_seq_tensor, sample_label = data_module.test_dataset[0]
     sample_seq = sample_seq_tensor.cpu().numpy()
     
-    # Note: For prediction, we need raw 3-channel data if use_features=True in training
-    # Since demo data was already enhanced, create a raw test sample
-    test_seq = np.random.randn(50, 3).astype(np.float32)  # Raw x,y,z
+    # Create a raw test sample for prediction demo
+    test_seq = np.random.randn(100, 3).astype(np.float32)  # Raw x,y,z
     prediction, confidence = predict_motion(model, test_seq, use_features=True)
     
     print(f"Prediction: {prediction}")
@@ -610,5 +635,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("To train on your own data:")
     print("  from detect_motion_ml import train_motion_classifier")
-    print("  model, _, _ = train_motion_classifier(your_sequences, your_labels)")
+    print("  from create_dataset import create_fall_adl_dataset")
+    print("  sequences, labels, _, _ = create_fall_adl_dataset('JO_FALL')")
+    print("  model, _, _ = train_motion_classifier(sequences, labels)")
     print("=" * 60)

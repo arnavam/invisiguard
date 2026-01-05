@@ -116,6 +116,8 @@ def predict_file(
         ax.plot(time, df[plot_cols[0]].to_numpy(dtype=float), label=plot_cols[0], linewidth=1.2)
         if len(plot_cols) > 1 and plot_cols[1] != plot_cols[0]:
             ax.plot(time, df[plot_cols[1]].to_numpy(dtype=float), label=plot_cols[1], linewidth=1.0, alpha=0.9)
+        if len(plot_cols) > 2 and plot_cols[2] not in [plot_cols[0], plot_cols[1]]:
+            ax.plot(time, df[plot_cols[2]].to_numpy(dtype=float), label=plot_cols[2], linewidth=0.8, alpha=0.8)
 
 
         # overlay probability as semi-transparent red spans where intensity ~ prob
@@ -151,13 +153,13 @@ def predict_file(
 
 if __name__ == "__main__":
     # Configure these variables instead of using argparse
-    csv_path = r"JO_FALL/volunteer_1_left_hand/fall/Fall_backwards2.csv"  # path to your CSV
+    csv_path = r"JO_FALL/volunteer_6_left_hand/adl/applaud.csv"  # path to your CSV
     ckpt_path = r"checkpoints/fall-detection-epoch=35-val_loss=0.26.ckpt"  # path to your checkpoint
     seq_len = 100
     step_size = 20
     cols = ["Acc_x", "Acc_y", "Acc_z"] #or None to auto-select numeric cols
     threshold = 0.5
-    save_csv = "file_predictions.csv"
+    save_csv = "predictions/file_predictions.csv"
 
     predict_file(
         ckpt_path=ckpt_path,
@@ -167,4 +169,5 @@ if __name__ == "__main__":
         cols=cols,
         threshold=threshold,
         save_csv=save_csv,
+        save_plot= "predictions/file_prediction_plot.png"
     )
