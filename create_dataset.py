@@ -1,5 +1,6 @@
 import glob
 import os
+import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -350,6 +351,75 @@ def explore_folder_structure(root_folder: str, max_depth: int = 4):
     print("-" * 50)
 
 
+def save_dataset_as_pkl(
+    sequences: np.ndarray,
+    labels: np.ndarray,
+    label_map: Dict[str, int],
+    feature_names: List[str],
+    output_path: str = "dataset.pkl",
+) -> str:
+    """
+    Save the dataset as a pickle file.
+
+    Args:
+        sequences: Array of shape (n_samples, seq_len, n_features)
+        labels: Array of shape (n_samples,)
+        label_map: Dictionary mapping label names to indices
+        feature_names: List of feature/column names
+        output_path: Path to save the pickle file
+
+    Returns:
+        output_path: Path where the file was saved
+    """
+    dataset = {
+        "sequences": sequences,
+        "labels": labels,
+        "label_map": label_map,
+        "feature_names": feature_names,
+        "metadata": {
+            "n_samples": len(sequences),
+            "seq_len": sequences.shape[1],
+            "n_features": sequences.shape[2],
+            "n_classes": len(label_map),
+        },
+    }
+
+    with open(output_path, "wb") as f:
+        pickle.dump(dataset, f)
+
+    print(f"\nDataset saved to: {output_path}")
+    print(f"  File size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
+
+    return output_path
+
+
+def load_dataset_from_pkl(input_path: str) -> Tuple[np.ndarray, np.ndarray, Dict[str, int], List[str]]:
+    """
+    Load a dataset from a pickle file.
+
+    Args:
+        input_path: Path to the pickle file
+
+    Returns:
+        sequences, labels, label_map, feature_names
+    """
+    with open(input_path, "rb") as f:
+        dataset = pickle.load(f)
+
+    print(f"\nDataset loaded from: {input_path}")
+    print(f"  Samples: {dataset['metadata']['n_samples']}")
+    print(f"  Sequence length: {dataset['metadata']['seq_len']}")
+    print(f"  Features: {dataset['metadata']['n_features']}")
+    print(f"  Classes: {dataset['metadata']['n_classes']}")
+
+    return (
+        dataset["sequences"],
+        dataset["labels"],
+        dataset["label_map"],
+        dataset["feature_names"],
+    )
+
+
 # Example usage
 if __name__ == "__main__":
     # First, explore the folder structure
@@ -369,15 +439,14 @@ if __name__ == "__main__":
     print(f"Label mapping: {label_map}")
     print(f"Features used: {feature_names}")
 
-    # # You can also use the general function with custom settings
-    # sequences2, labels2, label_map2, feature_names2 = (
-    #     create_dataset_from_folder_structure(
-    #         data_folder=data_root,
-    #         seq_len=100,
-    #         step_size=20,
-    #         normalize=True,
-    #         label_map={"adl": 0, "fall": 1},
-    #         label_from_parent=True,
-    #         label_folder_names=["adl", "fall"],
-    #     )
-    # )
+    # Save dataset as pickle file
+    save_dataset_as_pkl(
+        sequences=sequences,
+        labels=labels,
+        label_map=label_map,
+        feature_names=feature_names,
+        output_path="fall_adl_dataset.pkl",
+    )
+
+    # Example: Load the saved dataset
+    # sequences, labels, label_map, feature_names = load_dataset_from_pkl("fall_adl_dataset.pkl")
